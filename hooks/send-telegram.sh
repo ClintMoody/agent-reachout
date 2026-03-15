@@ -8,40 +8,72 @@ fi
 
 payload=$(cat)
 
+# Debounce Stop events — skip if last Stop was less than 30 seconds ago
+DEBOUNCE_FILE="/tmp/agent-reachout-last-stop"
+event_name=$(echo "$payload" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("hook_event_name",""))' 2>/dev/null || echo "")
+
+if [ "$event_name" = "Stop" ]; then
+  now=$(date +%s)
+  if [ -f "$DEBOUNCE_FILE" ]; then
+    last_stop=$(cat "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
+    elapsed=$((now - last_stop))
+    if [ "$elapsed" -lt 30 ]; then
+      exit 0
+    fi
+  fi
+  echo "$now" > "$DEBOUNCE_FILE"
+fi
+
 message=$(echo "$payload" | python3 -c '
 import json
 import sys
+from datetime import datetime
 
 payload = json.load(sys.stdin)
 event = payload.get("hook_event_name", "Unknown")
-lines = [f"Claude Code: {event}"]
 
 if event == "Notification":
-    notification_type = payload.get("notification_type")
-    title = payload.get("title")
-    message = payload.get("message")
-    if notification_type:
-        lines.append(f"Type: {notification_type}")
+    notification_type = payload.get("notification_type", "")
+    title = payload.get("title", "")
+    message = payload.get("message", "")
+    # Build a clean, informative notification
+    lines = []
     if title:
-        lines.append(f"Title: {title}")
+        lines.append(f"🔔 {title}")
+    elif notification_type:
+        lines.append(f"🔔 Claude Code: {notification_type}")
+    else:
+        lines.append("🔔 Claude Code: Notification")
     if message:
-        lines.append(f"Message: {message}")
+        # Truncate long messages to keep Telegram tidy
+        msg = message if len(message) <= 500 else message[:497] + "..."
+        lines.append(msg)
+    print("\n".join(lines))
+
 elif event == "PermissionRequest":
-    tool_name = payload.get("tool_name")
+    tool_name = payload.get("tool_name", "unknown tool")
     tool_input = payload.get("tool_input", {})
-    if tool_name:
-        lines.append(f"Tool: {tool_name}")
+    lines = [f"⚠️ Claude Code needs permission: {tool_name}"]
     if isinstance(tool_input, dict):
         for key in ("command", "file_path", "pattern", "url", "query", "message"):
             if key in tool_input:
-                lines.append(f"{key}: {tool_input[key]}")
+                detail = str(tool_input[key])
+                if len(detail) > 200:
+                    detail = detail[:197] + "..."
+                lines.append(f"  {key}: {detail}")
                 break
-elif event == "Stop":
-    reason = payload.get("stop_reason") or payload.get("reason")
-    if reason:
-        lines.append(f"Reason: {reason}")
+    print("\n".join(lines))
 
-print("\n".join(lines))
+elif event == "Stop":
+    reason = payload.get("stop_reason") or payload.get("reason") or ""
+    ts = datetime.now().strftime("%H:%M")
+    if reason:
+        print(f"✅ Claude Code finished at {ts}\nReason: {reason}")
+    else:
+        print(f"✅ Claude Code finished at {ts}")
+
+else:
+    print(f"Claude Code: {event}")
 ')
 
 curl -sS -X POST "https://api.telegram.org/bot${AGENT_REACHOUT_TELEGRAM_BOT_TOKEN}/sendMessage" \
