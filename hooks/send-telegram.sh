@@ -8,16 +8,29 @@ fi
 
 payload=$(cat)
 
-# Debounce Stop events — skip if last Stop was less than 30 seconds ago
+# Debounce Stop events — only send if a tool was used since last Stop
+# This prevents spammy "finished" messages after every conversational reply
 DEBOUNCE_FILE="/tmp/agent-reachout-last-stop"
+TOOL_FLAG="/tmp/agent-reachout-tool-used"
 event_name=$(echo "$payload" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("hook_event_name",""))' 2>/dev/null || echo "")
 
+# Track when tools are used (Notification/PermissionRequest indicate active work)
+if [ "$event_name" = "Notification" ] || [ "$event_name" = "PermissionRequest" ]; then
+  touch "$TOOL_FLAG"
+fi
+
 if [ "$event_name" = "Stop" ]; then
+  # Only notify if tools were used since last Stop
+  if [ ! -f "$TOOL_FLAG" ]; then
+    exit 0
+  fi
+  rm -f "$TOOL_FLAG"
+  # Also debounce rapid successive Stops (within 10s)
   now=$(date +%s)
   if [ -f "$DEBOUNCE_FILE" ]; then
     last_stop=$(cat "$DEBOUNCE_FILE" 2>/dev/null || echo 0)
     elapsed=$((now - last_stop))
-    if [ "$elapsed" -lt 30 ]; then
+    if [ "$elapsed" -lt 10 ]; then
       exit 0
     fi
   fi
